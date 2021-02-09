@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -32,13 +33,20 @@ func New() *Beats {
 }
 
 func (b *Beats) Start(ctx context.Context) error {
+	m := json.NewEncoder(os.Stdout)
+	var err error
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case actions := <-b.logs:
 			for _, action := range actions {
-				fmt.Println(action)
+				if action.action == Create {
+					err = m.Encode(action.Source)
+					if err != nil {
+						panic(err)
+					}
+				}
 			}
 		}
 	}
