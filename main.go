@@ -12,6 +12,6 @@ func main() {
 	b := eat.New()
 	ctx := context.TODO()
 	go b.Start(ctx)
-	http.HandleFunc("/", b.Handle)
+	http.Handle("/", b.Mux)
 	log.Fatal(http.ListenAndServe(":9200", nil))
 }
