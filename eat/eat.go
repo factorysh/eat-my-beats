@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -19,18 +18,26 @@ import (
 type Beats struct {
 	logs chan []*fastjson.Value
 	Mux  *http.ServeMux
+	out  io.Writer
 }
 
-func New() *Beats {
+func New(out io.Writer) *Beats {
 	b := &Beats{
 		logs: make(chan []*fastjson.Value, 100),
 		Mux:  &http.ServeMux{},
+		out:  out,
 	}
-	b.Mux.HandleFunc("/", b.middleware(b.home))
-	b.Mux.HandleFunc("/_bulk", b.middleware(b.bulk))
-	b.Mux.HandleFunc("/_template/", b.middleware(b.template))
-	b.Mux.HandleFunc("/_xpack/", b.middleware(b.xpack))
-	b.Mux.HandleFunc("_component_template/", b.middleware(func(w http.ResponseWriter, r *http.Request) {
+	prefix := "/beats"
+	if prefix != "" {
+		b.Mux.HandleFunc("/", b.middleware(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(404)
+		}))
+	}
+	b.Mux.HandleFunc(prefix+"/", b.middleware(b.home))
+	b.Mux.HandleFunc(prefix+"/_bulk", b.middleware(b.bulk))
+	b.Mux.HandleFunc(prefix+"/_template/", b.middleware(b.template))
+	b.Mux.HandleFunc(prefix+"/_xpack/", b.middleware(b.xpack))
+	b.Mux.HandleFunc(prefix+"/_component_template/", b.middleware(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 	}))
 	return b
@@ -43,9 +50,13 @@ func (b *Beats) Start(ctx context.Context) error {
 			return nil
 		case logs := <-b.logs:
 			for _, log := range logs {
-				//	fmt.Println("type", string(log.GetStringBytes("type")))
+				fmt.Println("type", string(log.GetStringBytes("type")))
 				if bytes.Compare(log.GetStringBytes("type"), []byte("redis")) == 0 {
-					os.Stdout.Write(log.MarshalTo(nil))
+					_, err := b.out.Write(log.MarshalTo(nil))
+					if err != nil {
+						fmt.Println(err)
+						return err
+					}
 				}
 			}
 		}
@@ -54,7 +65,7 @@ func (b *Beats) Start(ctx context.Context) error {
 
 func (b *Beats) middleware(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		fmt.Println("Request", r.Method, r.URL, r.Header)
+		fmt.Println("Request", r.Method, r.URL.Path, r.Header)
 		w.Header().Add("Accept-Encoding", "gzip")
 		h.ServeHTTP(w, r)
 	}
@@ -62,8 +73,7 @@ func (b *Beats) middleware(h http.HandlerFunc) http.HandlerFunc {
 
 func (b *Beats) home(w http.ResponseWriter, r *http.Request) {
 	fmt.Println(r.Header)
-	w.Header().Add("Accept-Encoding", "gzip")
-	if r.URL.Path != "/" {
+	if r.URL.Path != "/beats/" {
 		w.WriteHeader(404)
 		return
 	}
