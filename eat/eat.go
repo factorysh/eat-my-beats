@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -64,8 +65,15 @@ func (b *Beats) Start(ctx context.Context) error {
 }
 
 func (b *Beats) middleware(h http.HandlerFunc) http.HandlerFunc {
+	p := os.Getenv("PASSWORD")
 	return func(w http.ResponseWriter, r *http.Request) {
 		fmt.Println("Request", r.Method, r.URL.Path, r.Header)
+		user, password, ok := r.BasicAuth()
+		if !ok || user != "beats" || password != p {
+			w.WriteHeader(401)
+			fmt.Println("Bim 401")
+			return
+		}
 		w.Header().Add("Accept-Encoding", "gzip")
 		h.ServeHTTP(w, r)
 	}
