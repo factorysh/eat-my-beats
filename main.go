@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 	"net/http"
 
@@ -8,6 +9,9 @@ import (
 )
 
 func main() {
-	http.HandleFunc("/", eat.Beats)
+	b := eat.New()
+	ctx := context.TODO()
+	go b.Start(ctx)
+	http.HandleFunc("/", b.Handle)
 	log.Fatal(http.ListenAndServe(":9200", nil))
 }
