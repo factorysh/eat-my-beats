@@ -2,24 +2,28 @@ package eat
 
 import (
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
+
+	"github.com/valyala/fastjson"
 )
 
 type Beats struct {
-	logs chan []*Action
+	logs chan []*fastjson.Value
 	Mux  *http.ServeMux
 }
 
 func New() *Beats {
 	b := &Beats{
-		logs: make(chan []*Action, 100),
+		logs: make(chan []*fastjson.Value, 100),
 		Mux:  &http.ServeMux{},
 	}
 	b.Mux.HandleFunc("/", b.middleware(b.home))
@@ -33,19 +37,15 @@ func New() *Beats {
 }
 
 func (b *Beats) Start(ctx context.Context) error {
-	m := json.NewEncoder(os.Stdout)
-	var err error
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case actions := <-b.logs:
-			for _, action := range actions {
-				if action.action == Create {
-					err = m.Encode(action.Source)
-					if err != nil {
-						panic(err)
-					}
+		case logs := <-b.logs:
+			for _, log := range logs {
+				//	fmt.Println("type", string(log.GetStringBytes("type")))
+				if bytes.Compare(log.GetStringBytes("type"), []byte("redis")) == 0 {
+					os.Stdout.Write(log.MarshalTo(nil))
 				}
 			}
 		}
@@ -127,41 +127,45 @@ func (b *Beats) bulk(w http.ResponseWriter, r *http.Request) {
 		reader = r.Body
 	}
 	scanner := bufio.NewScanner(reader)
-	actions := make([]*Action, 0)
-	responses := make([]map[string]interface{}, 0)
-	for scanner.Scan() {
-		action, err := parseAction(scanner.Text())
-		if err != nil {
-			fmt.Println(err)
-			w.WriteHeader(500)
-			return
-		}
-		if action.HasSource {
-			scanner.Scan() // assert true
-			s := make(map[string]interface{})
-			err = json.Unmarshal([]byte(scanner.Text()), &s)
-			if err != nil {
-				fmt.Println(err)
-				w.WriteHeader(500)
-				return
-			}
-			action.Source = s
-		}
-		actions = append(actions, action)
-		responses = append(responses, map[string]interface{}{
-			"index": map[string]interface{}{"status": 201},
-		})
-	}
-	b.logs <- actions
-	jr, err := json.Marshal(responses)
+	responses, err := b.scan(scanner)
 	if err != nil {
 		fmt.Println(err)
 		w.WriteHeader(500)
 		return
 	}
 
-	resp := `{"took":%d, "status": 200, "errors": false, "items":`
+	resp := `{"took":%d, "status": 200, "errors": false, "items":[`
 	fmt.Fprintf(w, resp, time.Since(chrono)/time.Second)
-	w.Write(jr)
-	w.Write([]byte("}"))
+	w.Write([]byte(strings.Join(responses, ",")))
+	w.Write([]byte("]}"))
+}
+
+func (b *Beats) scan(scanner *bufio.Scanner) ([]string, error) {
+	var p fastjson.Parser
+	logs := make([]*fastjson.Value, 0)
+	responses := make([]string, 0)
+	for scanner.Scan() {
+		v, err := p.Parse(scanner.Text())
+		if err != nil {
+			return responses, err
+		}
+		if !v.Exists("delete") {
+			ok := scanner.Scan()
+			if !ok {
+				return responses, errors.New("odd bulk")
+			}
+			if v.Exists("create") {
+				// it's the index name
+				//argument := v.Get("create")
+				v, err := p.Parse(scanner.Text())
+				if err != nil {
+					return responses, err
+				}
+				logs = append(logs, v)
+			}
+			responses = append(responses, `{"index":{"status": 201}}`)
+		}
+	}
+	b.logs <- logs
+	return responses, nil
 }
