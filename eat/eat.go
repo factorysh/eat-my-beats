@@ -58,6 +58,7 @@ func (b *Beats) Start(ctx context.Context) error {
 						fmt.Println(err)
 						return err
 					}
+					b.out.Write([]byte("\n"))
 				}
 			}
 		}
