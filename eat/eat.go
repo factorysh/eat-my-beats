@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rs/zerolog/hlog"
+	"github.com/rs/zerolog/log"
 	"github.com/valyala/fastjson"
 )
 
@@ -36,9 +38,12 @@ func New(out io.Writer) *Beats {
 	}
 	b.Mux.HandleFunc(prefix+"/", b.middleware(b.home))
 	b.Mux.HandleFunc(prefix+"/_bulk", b.middleware(b.bulk))
+	b.Mux.HandleFunc(prefix+"/_template", b.middleware(b.template))
 	b.Mux.HandleFunc(prefix+"/_template/", b.middleware(b.template))
-	b.Mux.HandleFunc(prefix+"/_xpack/", b.middleware(b.xpack))
-	b.Mux.HandleFunc(prefix+"/_component_template/", b.middleware(func(w http.ResponseWriter, r *http.Request) {
+	b.Mux.HandleFunc(prefix+"/_cat/templates/", b.middleware(b.template))
+	b.Mux.HandleFunc(prefix+"/_xpack", b.middleware(b.xpack))
+	b.Mux.HandleFunc(prefix+"/_license", b.middleware(b.license))
+	b.Mux.HandleFunc(prefix+"/_component_template", b.middleware(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
 	}))
 	return b
@@ -51,7 +56,7 @@ func (b *Beats) Start(ctx context.Context) error {
 			return nil
 		case logs := <-b.logs:
 			for _, log := range logs {
-				fmt.Println("type", string(log.GetStringBytes("type")))
+				//fmt.Println("type", string(log.GetStringBytes("type")))
 				if bytes.Compare(log.GetStringBytes("type"), []byte("redis")) == 0 {
 					_, err := b.out.Write(log.MarshalTo(nil))
 					if err != nil {
@@ -67,8 +72,8 @@ func (b *Beats) Start(ctx context.Context) error {
 
 func (b *Beats) middleware(h http.HandlerFunc) http.HandlerFunc {
 	p := os.Getenv("PASSWORD")
+
 	return func(w http.ResponseWriter, r *http.Request) {
-		fmt.Println("Request", r.Method, r.URL.Path, r.Header)
 		user, password, ok := r.BasicAuth()
 		if !ok || user != "beats" || password != p {
 			w.WriteHeader(401)
@@ -76,7 +81,7 @@ func (b *Beats) middleware(h http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		w.Header().Add("Accept-Encoding", "gzip")
-		h.ServeHTTP(w, r)
+		hlog.NewHandler(log.Logger)(h).ServeHTTP(w, r)
 	}
 }
 
@@ -117,18 +122,24 @@ func (b *Beats) template(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("{}"))
 }
 
+func (b *Beats) license(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(400)
+}
+
 func (b *Beats) xpack(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(400)
 }
 
 func (b *Beats) bulk(w http.ResponseWriter, r *http.Request) {
 	chrono := time.Now()
+	l := hlog.FromRequest(r)
 	if r.Method != "POST" {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 
 	if r.Body == nil {
+		l.Info().Msg("Empty body")
 		w.WriteHeader(400)
 		return
 	}
@@ -138,7 +149,7 @@ func (b *Beats) bulk(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("Content-Encoding") == "gzip" {
 		reader, err = gzip.NewReader(r.Body)
 		if err != nil {
-			fmt.Println(err)
+			l.Error().Err(err).Msg("")
 			w.WriteHeader(500)
 			return
 		}
@@ -148,7 +159,7 @@ func (b *Beats) bulk(w http.ResponseWriter, r *http.Request) {
 	scanner := bufio.NewScanner(reader)
 	responses, err := b.scan(scanner)
 	if err != nil {
-		fmt.Println(err)
+		l.Error().Stack().Err(err).Msg("")
 		w.WriteHeader(500)
 		return
 	}
@@ -157,6 +168,10 @@ func (b *Beats) bulk(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, resp, time.Since(chrono)/time.Second)
 	w.Write([]byte(strings.Join(responses, ",")))
 	w.Write([]byte("]}"))
+	l.Info().
+		Dur("chrono", time.Since(chrono)).
+		Int("bulk", len(responses)).
+		Msg("bulk")
 }
 
 func (b *Beats) scan(scanner *bufio.Scanner) ([]string, error) {
@@ -164,13 +179,16 @@ func (b *Beats) scan(scanner *bufio.Scanner) ([]string, error) {
 	logs := make([]*fastjson.Value, 0)
 	responses := make([]string, 0)
 	for scanner.Scan() {
-		v, err := p.Parse(scanner.Text())
+		line := scanner.Text()
+		v, err := p.Parse(line)
 		if err != nil {
+			log.Logger.Error().Str("line", line).Err(err).Msg("JSON parsing")
 			return responses, err
 		}
-		if !v.Exists("delete") {
+		if v.Exists("index") || v.Exists("update") || v.Exists("create") {
 			ok := scanner.Scan()
 			if !ok {
+				log.Logger.Error().Str("line", line).Err(err).Msg("Can't parse next line")
 				return responses, errors.New("odd bulk")
 			}
 			if v.Exists("create") {
@@ -182,8 +200,8 @@ func (b *Beats) scan(scanner *bufio.Scanner) ([]string, error) {
 				}
 				logs = append(logs, v)
 			}
-			responses = append(responses, `{"index":{"status": 201}}`)
 		}
+		responses = append(responses, `{"index":{"status": 201}}`)
 	}
 	b.logs <- logs
 	return responses, nil
