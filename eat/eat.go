@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -189,7 +188,8 @@ func (b *Beats) scan(scanner *bufio.Scanner) ([]string, error) {
 			ok := scanner.Scan()
 			if !ok {
 				log.Logger.Error().Str("line", line).Err(err).Msg("Can't parse next line")
-				return responses, errors.New("odd bulk")
+				//return responses, errors.New("odd bulk")
+				continue
 			}
 			if v.Exists("create") {
 				// it's the index name
